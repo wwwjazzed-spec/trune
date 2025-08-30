@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Adventure RPG Starter</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+  <style>html,body{margin:0;padding:0;background:#000;overflow:hidden}</style>
+  <!-- Phaser 3 (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.0/dist/phaser.min.js"></script>
+</head>
+<body>
+<script>
+/* =========================================================
+   Adventure RPG Starter — Deltarune-style structure
+   Scenes: Boot -> Overworld <-> Battle -> Dialogue (overlay)
+   Controls:
+     - Keyboard: Arrows/WASD move | Z/Enter confirm | X cancel | C menu
+     - Gamepad: Left stick/D-pad move | ✕ confirm | ◯ cancel | △ menu
+   ========================================================= */
+
+const GAME_SCALE = 2;              // retro zoom
+const VIEW_W = 240, VIEW_H = 135;  // logical resolution (16:9)
+const TILE = 16;
+
+// ------- Shared Game State -------
+const GameState = {
+  player: { hp: 30, maxHp: 30, atk: 5, def: 1, gold: 0, xp: 0, level: 1 },
+  inventory: [{ id: 'potion', name:'Potion', heal: 15, qty: 2 }],
+  flags: {},
+  randomEncounterSteps: 0,
+  inDialogue: false,
+};
+
+// Simple enemy definitions
+const ENEMIES = {
+  slime: { name:'Goopling', hp: 20, atk: 3, def: 0, gold: 5, xp: 6 },
+  bat:   { name:'Cave Bat', hp: 16, atk: 4, def: 1, gold: 7, xp: 7 }
+};
+
+// ------- Utility: Input Helper (KB + Gamepad) -------
+class InputHelper {
+  constructor(scene){
+    this.scene = scene;
+    this.padIndex = null;
+    window.addEventListener('gamepadconnected', e => this.padIndex = e.gamepad.index);
+    window.addEventListener('gamepaddisconnected', () => this.padIndex = null);
+    this.cursors = scene.input.keyboard.createCursorKeys();
+    this.keys = scene.input.keyboard.addKeys({
+      W:'W',A:'A',S:'S',D:'D', Z:'Z', X:'X', C:'C', ENTER:'ENTER'
+    });
+    this._confirmLatch=false; this._cancelLatch=false; this._menuLatch=false;
+  }
+  axis(){
+    let x=0,y=0;
+    if (this.cursors.left.isDown||this.keys.A.isDown) x=-1;
+    else if (this.cursors.right.isDown||this.keys.D.isDown) x=1;
+    if (this.cursors.up.isDown||this.keys.W.isDown) y=-1;
+    else if (this.cursors.down.isDown||this.keys.S.isDown) y=1;
+    const gp = this.padIndex!==null && navigator.getGamepads()[this.padIndex];
+    if (gp){
+      const axX = Math.abs(gp.axes[0])>0.2? gp.axes[0]:0;
+      const axY = Math.abs(gp.axes[1])>0.2? gp.axes[1]:0;
+      const dpadX = (gp.buttons[15]?.pressed?1:0) - (gp.buttons[14]?.pressed?1:0);
+      const dpadY = (gp.buttons[13]?.pressed?1:0) - (gp.buttons[12]?.pressed?1:0);
+      x = Math.abs(axX)>Math.abs(x)? axX : x + dpadX;
+      y = Math.abs(axY)>Math.abs(y)? axY : y + dpadY;
+    }
+    return {x:Phaser.Math.Clamp(x,-1,1), y:Phaser.Math.Clamp(y,-1,1)};
+  }
+  _pressedOnce(kbKey, gpBtnIndex, latchName){
+    const kb = kbKey?.isDown;
+    const gp = this.padIndex!==null && navigator.getGamepads()[this.padIndex]?.buttons[gpBtnIndex]?.pressed;
+    const any = !!kb || !!gp;
+    const latched = this[latchName];
+    if (any && !latched){ this[latchName]=true; return true; }
+    if (!any) this[latchName]=false;
+    return false;
+  }
+  confirm(){ return this._pressedOnce(this.keys.Z||this.keys.ENTER, 0, '_confirmLatch'); } // ✕
+  cancel(){ return this._pressedOnce(this.keys.X, 1, '_cancelLatch'); }                   // ◯
+  menu(){   return this._pressedOnce(this.keys.C, 2, '_menuLatch'); }                     // △
+}
+
+// ------- Boot Scene (generate simple textures) -------
+class BootScene extends Phaser.Scene {
+  constructor(){ super('Boot'); }
+  preload(){}
+  create(){
+    // Generate simple textures using Graphics (no external art)
+    const g = this.add.graphics();
+
+    // Player (blue 12x14)
+    g.fillStyle(0x3da9fc).fillRect(0,0,12,14);
+    g.generateTexture('player',12,14); g.clear();
+
+    // Tiles
+    g.fillStyle(0x2a9d8f).fillRect(0,0,TILE,TILE); g.generateTexture('grass',TILE,TILE); g.clear();
+    g.fillStyle(0x386641).fillRect(0,0,TILE,TILE); g.generateTexture('forest',TILE,TILE); g.clear();
+    g.fillStyle(0x6b705c).fillRect(0,0,TILE,TILE); g.generateTexture('rock',TILE,TILE); g.clear();
+    g.fillStyle(0x3d405b).fillRect(0,0,TILE,TILE); g.generateTexture('wall',TILE,TILE); g.clear();
+    g.fillStyle(0xe9c46a).fillRect(0,0,TILE,TILE); g.generateTexture('path',TILE,TILE); g.clear();
+
+    // UI panel
+    g.fillStyle(0x000000,0.7).fillRect(0,0,VIEW_W,40);
+    g.lineStyle(1,0xffffff,1).strokeRect(0,0,VIEW_W,40);
+    g.generateTexture('panel',VIEW_W,40); g.clear();
+
+    // Enemy textures
+    g.fillStyle(0x9b5de5).fillRect(0,0,24,16); g.generateTexture('slime',24,16); g.clear();
+    g.fillStyle(0xff006e).fillRect(0,0,24,16); g.generateTexture('bat',24,16); g.clear();
+
+    this.scene.start('Overworld');
+  }
+}
+
+// ------- Overworld (top-down, collisions, encounters) -------
+class OverworldScene extends Phaser.Scene {
+  constructor(){ super('Overworld'); }
+  create(){
+    this.inputHelper = new InputHelper(this);
+    this.cameras.main.setBackgroundColor('#000');
+
+    // Simple tilemap (0 grass walkable, 1 forest block, 2 rock block, 3 path walkable, 4 wall block)
+    this.map = [
+      "444444444444444444444444444444444444",
+      "4.............1111.................4",
+      "4....2222.....1..1.....1111........4",
+      "4....2..2.....1..1.....1..1....111.4",
+      "4....2222.....1111.....1..1....1...4",
+      "4......................1111....1...4",
+      "4..3333333333..................1...4",
+      "4..3..........1111.............1...4",
+      "4..3..2222....1..1...2222......1...4",
+      "4..3..2..2....1..1...2..2..........4",
+      "4..3..2222....1111...2222..........4",
+      "4..3...............................4",
+      "4..3333333333333333333333333333...4",
+      "4.................................4",
+      "444444444444444444444444444444444444"
+    ];
+
+    this.walkable = new Set(['.', '3']); // '.' grass, '3' path
+    this.tileSprites = this.add.group();
+
+    // Build tiles
+    for(let y=0;y<this.map.length;y++){
+      for(let x=0;x<this.map[0].length;x++){
+        const ch = this.map[y][x];
+        let key='grass';
+        if (ch==='4') key='wall';
+        else if (ch==='1') key='forest';
+        else if (ch==='2') key='rock';
+        else if (ch==='3') key='path';
+        const s = this.add.image(x*TILE+TILE/2,y*TILE+TILE/2,key).setOrigin(0.5);
+        this.tileSprites.add(s);
+      }
+    }
+
+    // Player
+    this.player = this.add.image(5*TILE+8, 6*TILE+8, 'player').setOrigin(0.5,1).setDepth(10);
+    this.playerSpeed = 60;
+
+    // Camera
+    this.cameras.main.setBounds(0,0,this.map[0].length*TILE, this.map.length*TILE);
+    this.cameras.main.startFollow(this.player, true, 0.2, 0.2);
+    this.cameras.main.setZoom(GAME_SCALE);
+
+    // Step counter for random encounters
+    GameState.randomEncounterSteps = 0;
+
+    // Intro dialogue once
+    if (!GameState.flags.intro) {
+      GameState.flags.intro = true;
+      this.launchDialogue([
+        "You awaken in a quiet field...",
+        "Something out there needs your help.",
+        "Move with Arrows/WASD or left stick. Press Z/✕ to interact."
+      ]);
+    }
+
+    // Simple interactable sign on path
+    this.signPos = {x: 18*TILE, y: 6*TILE};
+    this.sign = this.add.rectangle(this.signPos.x, this.signPos.y+4, 10, 10, 0xffffff).setDepth(5);
+    this.signLabel = this.add.text(0,0,"", {fontFamily:'monospace', fontSize:8, color:'#fff'}).setScrollFactor(0).setDepth(100);
+  }
+
+  update(time, dt){
+    const input = this.inputHelper;
+    const speed = this.playerSpeed * (dt/1000);
+
+    // Movement with collision (grid-aware)
+    const dir = input.axis();
+    this.tryMove(dir.x*speed, dir.y*speed);
+
+    // Interact: read sign
+    const nearSign = Phaser.Math.Distance.Between(this.player.x, this.player.y, this.signPos.x, this.signPos.y) < 20;
+    this.signLabel.setText(nearSign? "Press Z/✕ to read" : "");
+    this.signLabel.setPosition(VIEW_W/2-40, VIEW_H-20).setScrollFactor(0).setScale(1.0*GAME_SCALE);
+    if (nearSign && input.confirm()) {
+      this.launchDialogue(["The sign reads:",
+                           "\"Beware of random encounters on the grass!\""]);
+    }
+
+    // Menu (show stats)
+    if (input.menu()){
+      this.launchDialogue([
+        HP ${GameState.player.hp}/${GameState.player.maxHp}  LV ${GameState.player.level},
+        ATK ${GameState.player.atk}  DEF ${GameState.player.def},
+        Gold ${GameState.player.gold}  XP ${GameState.player.xp},
+        Items: ${GameState.inventory.map(i=>${i.name} x${i.qty}).join(', ') || 'None'}
+      ]);
+    }
+  }
+
+  tileBlocked(worldX, worldY){
+    const x = Math.floor(worldX / TILE), y = Math.floor(worldY / TILE);
+    if (y<0 || y>=this.map.length || x<0 || x>=this.map[0].length) return true;
+    const ch = this.map[y][x];
+    return !this.walkable.has(ch);
+  }
+
+  tryMove(dx, dy){
+    if (GameState.inDialogue) return;
+    const nextX = this.player.x + dx;
+    const nextY = this.player.y + dy;
+
+    // axis-aligned collision checks
+    if (!this.tileBlocked(nextX, this.player.y)) this.player.x = nextX;
+    if (!this.tileBlocked(this.player.x, nextY)) this.player.y = nextY;
+
+    // Encounter logic (on grass only)
+    const tileCh = this.map[Math.floor(this.player.y/TILE)][Math.floor(this.player.x/TILE)];
+    if (this.walkable.has(tileCh) && tileCh!== '3') { // grass, not path
+      GameState.randomEncounterSteps += Math.abs(dx)+Math.abs(dy);
+      if (GameState.randomEncounterSteps > 90 && Math.random()<0.02){
+        GameState.randomEncounterSteps = 0;
+        const pool = Math.random()<0.5? 'slime':'bat';
+        this.scene.start('Battle', { enemyId: pool });
+      }
+    }
+  }
+
+  launchDialogue(lines){
+    if (GameState.inDialogue) return;
+    GameState.inDialogue = true;
+    this.scene.launch('Dialogue', { lines });
+  }
+}
+
+// ------- Dialogue Overlay (typewriter, confirm to advance) -------
+class DialogueScene extends Phaser.Scene {
+  constructor(){ super('Dialogue'); }
+  create(data){
+    this.inputHelper = new InputHelper(this);
+    this.lines = data.lines || ["..."];
+    this.current = 0;
+    this.panel = this.add.image(VIEW_W/2, VIEW_H-20, 'panel').setScrollFactor(0).setScale(1).setDepth(1000);
+    this.text = this.add.text(8, VIEW_H-36, "", {fontFamily:'monospace', fontSize:10, color:'#fff', wordWrap:{width:VIEW_W-16}})
+      .setScrollFactor(0).setDepth(1001);
+
+    this.cameras.main.setZoom(GAME_SCALE);
+    this.typewrite(this.lines[this.current]);
+  }
+  typewrite(str){
+    this.text.setText("");
+    this.i=0; this.msg=str;
+    this.time.addEvent({ delay: 18, repeat: str.length-1, callback: ()=>{
+      this.text.setText(this.msg.slice(0, ++this.i));
+    }});
+  }
+  update(){
+    if (this.inputHelper.confirm()){
+      if (this.i < (this.msg?.length||0)) { this.text.setText(this.msg); this.i = this.msg.length; return; }
+      this.current++;
+      if (this.current >= this.lines.length){
+        GameState.inDialogue = false;
+        this.scene.stop();
+      } else {
+        this.typewrite(this.lines[this.current]);
+      }
+    }
+    if (this.inputHelper.cancel()){
+      GameState.inDialogue = false;
+      this.scene.stop();
+    }
+  }
+}
+
+// ------- Battle Scene (turn-based menu + simple AI) -------
+class BattleScene extends Phaser.Scene {
+  constructor(){ super('Battle'); }
+  init(data){
+    this.enemyBase = ENEMIES[data.enemyId] || ENEMIES.slime;
+    // Deep copy so HP is per-battle
+    this.enemy = JSON.parse(JSON.stringify(this.enemyBase));
+  }
+  create(){
+    this.inputHelper = new InputHelper(this);
+    this.cameras.main.setBackgroundColor('#111');
+    this.cameras.main.setZoom(GAME_SCALE);
+
+    // Simple layout
+    this.enemySprite = this.add.image(VIEW_W/2, 40, this.enemyBase===ENEMIES.slime?'slime':'bat').setOrigin(0.5);
+    this.add.image(VIEW_W/2, VIEW_H-20, 'panel');
+    this.infoText = this.add.text(8, 6, "", {fontFamily:'monospace', fontSize:10, color:'#fff'});
+
+    // Battle menu
+    this.menuItems = ['Attack','Defend','Magic','Item','Spare','Run'];
+    this.menuIndex = 0;
+    this.menuText = this.add.text(8, VIEW_H-36, "", {fontFamily:'monospace', fontSize:10, color:'#fff'});
+    this.descText = this.add.text(120, VIEW_H-36, "", {fontFamily:'monospace', fontSize:10, color:'#aaa', wordWrap:{width:VIEW_W-128}});
+
+    this.playerTurn = true;
+    this.defending = false;
+    this.updateInfo();
+    this.renderMenu();
+  }
+
+  updateInfo(){
+    this.infoText.setText(
+      `You  HP ${GameState.player.hp}/${GameState.player.maxHp}   ` +
+      ${this.enemy.name} HP ${this.enemy.hp}
+    );
+  }
+
+  renderMenu(){
+    const descs = {
+      Attack:'Strike the enemy.',
+      Defend:'Reduce damage this turn.',
+      Magic:'(Placeholder) small heal.',
+      Item:'Use an item from bag.',
+      Spare:'Show mercy if enemy wavers.',
+      Run:'Try to escape.'
+    };
+    const lines = this.menuItems.map((m,i)=> (i===this.menuIndex?'> ':'  ') + m);
+    this.menuText.setText(lines.join('\n'));
+    this.descText.setText(descs[this.menuItems[this.menuIndex]]);
+  }
+
+  update(){
+    const input = this.inputHelper;
+    const axis = input.axis();
+
+    // Navigate menu
+    if (axis.y>0.4 && !this._navLatch){ this._navLatch=true; this.menuIndex=(this.menuIndex+1)%this.menuItems.length; this.renderMenu(); }
+    else if (axis.y<-0.4 && !this._navLatch){ this._navLatch=true; this.menuIndex=(this.menuIndex-1+this.menuItems.length)%this.menuItems.length; this.renderMenu(); }
+    if (Math.abs(axis.y)<0.3) this._navLatch=false;
+
+    if (!this.waiting){
+      if (input.confirm() && this.playerTurn) {
+        this.playerChoose(this.menuItems[this.menuIndex]);
+      }
+      if (input.cancel() && this.playerTurn){
+        this.menuIndex = 0; this.renderMenu();
+      }
+    }
+  }
+
+  async playerChoose(choice){
+    this.waiting = true; this.defending=false;
+
+    const say = async (msg)=>{ this.addMessage(msg); await this.sleep(450); };
+
+    switch(choice){
+      case 'Attack':{
+        const dmg = Math.max(1, GameState.player.atk - this.enemy.def + Phaser.Math.Between(0,2));
+        this.enemy.hp = Math.max(0, this.enemy.hp - dmg);
+        await say(You attack! ${this.enemy.name} takes ${dmg}.);
+        break;
+      }
+      case 'Defend':{
+        this.defending = true;
+        await say("You brace for impact.");
+        break;
+      }
+      case 'Magic':{
+        const heal = 6;
+        GameState.player.hp = Math.min(GameState.player.maxHp, GameState.player.hp + heal);
+        await say(You whisper a tune. Recovered ${heal} HP.);
+        break;
+      }
+      case 'Item':{
+        const item = GameState.inventory.find(i=>i.id==='potion' && i.qty>0);
+        if (!item){ await say("No usable items."); break; }
+        item.qty--; GameState.player.hp = Math.min(GameState.player.maxHp, GameState.player.hp + item.heal);
+        await say(Used Potion. +${item.heal} HP.);
+        break;
+      }
+      case 'Spare':{
+        if (this.enemy.hp <= 6) { await this.victory(true); return; }
+        await say(${this.enemy.name} is not ready to be spared.);
+        break;
+      }
+      case 'Run':{
+        if (Math.random()<0.5){ await say("You fled safely!"); this.endBattle(false); return; }
+        await say("Couldn't escape!");
+        break;
+      }
+    }
+
+    if (this.enemy.hp<=0){ await this.victory(false); return; }
+    await this.enemyTurn();
+    if (GameState.player.hp<=0){ await this.defeat(); return; }
+
+    // Back to player
+    this.playerTurn = true;
+    this.waiting = false;
+    this.updateInfo();
+  }
+
+  async enemyTurn(){
+    this.playerTurn = false;
+    const say = async (msg)=>{ this.addMessage(msg); await this.sleep(450); };
+
+    // Simple AI: 80% attack, 20% taunt
+    if (Math.random()<0.8){
+      const variance = Phaser.Math.Between(0,2);
+      let dmg = Math.max(1, this.enemy.atk + variance - GameState.player.def);
+      if (this.defending) dmg = Math.max(0, Math.floor(dmg/2));
+      GameState.player.hp = Math.max(0, GameState.player.hp - dmg);
+      await say(${this.enemy.name} strikes for ${dmg}!);
+    } else {
+      await say(${this.enemy.name} looks at you curiously.);
+    }
+    this.updateInfo();
+  }
+
+  async victory(spared){
+    const e = this.enemyBase;
+    const say = async (msg)=>{ this.addMessage(msg); await this.sleep(450); };
+
+    if (!spared){
+      await say(${e.name} was defeated!);
+    } else {
+      await say(You spared ${e.name}.);
+    }
+    GameState.gold += e.gold;
+    GameState.xp += e.xp;
+    await say(Gained ${e.xp} XP and ${e.gold}G.);
+
+    // Level up at thresholds
+    const thresholds = [0, 10, 25, 45, 70, 100];
+    while (GameState.level < thresholds.length && GameState.xp >= thresholds[GameState.level]){
+      GameState.level++;
+      GameState.player.maxHp += 5; GameState.player.atk += 1;
+      await say(Level up! LV ${GameState.level}. HP+5 ATK+1);
+    }
+    this.endBattle(true);
+  }
+
+  async defeat(){
+    const say = async (msg)=>{ this.addMessage(msg); await this.sleep(600); };
+    await say("You collapse...");
+    // Soft reset
+    GameState.player.hp = GameState.player.maxHp;
+    GameState.gold = Math.max(0, GameState.gold-5);
+    await say("You wake up, a little poorer.");
+    this.endBattle(false);
+  }
+
+  endBattle(victory){
+    this.scene.start('Overworld');
+  }
+
+  addMessage(msg){
+    // Splash text mid-screen
+    const t = this.add.text(VIEW_W/2, VIEW_H/2, msg,
+      {fontFamily:'monospace', fontSize:12, color:'#fff'}).setOrigin(0.5).setDepth(1000);
+    this.time.delayedCall(400, ()=> t.destroy());
+  }
+  sleep(ms){ return new Promise(r=>this.time.delayedCall(ms, r)); }
+}
+
+// ------- Game Config -------
+const config = {
+  type: Phaser.AUTO,
+  width: VIEW_W,
+  height: VIEW_H,
+  pixelArt: true,
+  zoom: GAME_SCALE,
+  physics: { default: 'arcade' },
+  scene: [BootScene, OverworldScene, BattleScene, DialogueScene],
+  input: { gamepad: true }
+};
+
+new Phaser.Game(config);
+
+// ------- Optional: persist basic save/load -------
+window.addEventListener('beforeunload', ()=>{
+  localStorage.setItem('rpgSave', JSON.stringify(GameState));
+});
+window.addEventListener('load', ()=>{
+  const s = localStorage.getItem('rpgSave');
+  if (s){ try{
+    const persisted = JSON.parse(s);
+    // keep only safe fields
+    Object.assign(GameState.player, persisted.player||{});
+    GameState.inventory = persisted.inventory||GameState.inventory;
+    GameState.flags = persisted.flags||{};
+    GameState.gold = persisted.gold||GameState.gold;
+    GameState.xp = persisted.xp||GameState.xp;
+    GameState.randomEncounterSteps = 0;
+  }catch(e){} }
+});
+</script>
+</body>
+</html>
